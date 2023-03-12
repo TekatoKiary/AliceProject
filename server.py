@@ -1,106 +1,128 @@
-import os.path
-import random
-from flask import Flask, render_template, redirect, url_for
-from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, SubmitField
-from wtforms.validators import DataRequired
+# импортируем библиотеки
+from flask import Flask, request, jsonify
+import logging
 
-app = Flask(__name__, static_folder=os.path.abspath('static'))
+# создаём приложение
+# мы передаём __name__, в нём содержится информация,
+# в каком модуле мы находимся.
+# В данном случае там содержится '__main__',
+# так как мы обращаемся к переменной из запущенного модуля.
+# если бы такое обращение, например, произошло внутри модуля logging,
+# то мы бы получили 'logging'
+app = Flask(__name__)
 
-PROFESSIONS = 'инженер-исследователь, пилот, строитель, экзобиолог, врач, инженер по терраформированию, климатолог, ' \
-              'специалист по радиационной защите, астрогеолог, гляциолог, инженер жизнеобеспечения, метеоролог, ' \
-              'оператор марсохода, киберинженер, штурман, пилот дронов'.split(', ')
-MALE_NAMES = 'Anthony Bryan Carl Daniel Ethan Francis Mark'.split()
-FEMALE_NAMES = 'Ava Barbara Catherine Deborah Elizabeth Florence'.split()
+# Устанавливаем уровень логирования
+logging.basicConfig(level=logging.INFO)
 
-SURNAMES = 'Gerald Harrison Jones MacAlister Carroll Fitzgerald Ferguson Simpson Turner Murphy Dickinson'.split()
-EDUCATIONS = 'Среднее Высшее Начальное Профессиональное'.split()
-SEX = 'Мужчина Женщина Робот Ламинат'.split()  # ламинат добавил по просьбе друга
-MOTIVATIONS = [
-    'Всегда мечтал застрять на Марсе!', 'Хочу убежать от земных проблем',
-    'Мне сказали, что во время экспедиции будут бесплатные конфеты',
-    'Я люблю огород, но места для участка на земле заканчиваются, вследствие дорожают цены на них. '
-    'А на Марсе полно места и при этом бесплатно', 'Я хочу участвовать в терраформирование брата Земли, Марса',
-    'Моя главная мечта - протянуть провод от Земли до Марса, что поможет колонизации не только '
-    'разговаривать с родственниками, но и искать ответы в интернете'
-]
-
-COLORS = {'pink': '#FFC0CB',
-          'purple': '#800080',
-          'blue': ' #0000ff',
-          'lightblue': '#add8e6'}
-
-app.config['SECRET_KEY'] = 'yandexlyceum_secret_key'
+# Создадим словарь, чтобы для каждой сессии общения
+# с навыком хранились подсказки, которые видел пользователь.
+# Это поможет нам немного разнообразить подсказки ответов
+# (buttons в JSON ответа).
+# Когда новый пользователь напишет нашему навыку,
+# то мы сохраним в этот словарь запись формата
+# sessionStorage[user_id] = {'suggests': ["Не хочу.", "Не буду.", "Отстань!" ]}
+# Такая запись говорит, что мы показали пользователю эти три подсказки.
+# Когда он откажется купить слона,
+# то мы уберем одну подсказку. Как будто что-то меняется :)
+sessionStorage = {}
 
 
-class LoginForm(FlaskForm):
-    id_astronaut = StringField('Id астронавта', validators=[DataRequired()])
-    password_astronaut = PasswordField('Пароль астронавта', validators=[DataRequired()])
-    id_captain = StringField('Id капитана', validators=[DataRequired()])
-    password_captain = PasswordField('Пароль капитана', validators=[DataRequired()])
-    submit = SubmitField('Войти')
+@app.route('/post', methods=['POST'])
+# Функция получает тело запроса и возвращает ответ.
+# Внутри функции доступен request.json - это JSON,
+# который отправила нам Алиса в запросе POST
+def main():
+    logging.info(f'Request: {request.json!r}')
+
+    # Начинаем формировать ответ, согласно документации
+    # мы собираем словарь, который потом отдадим Алисе
+    response = {
+        'session': request.json['session'],
+        'version': request.json['version'],
+        'response': {
+            'end_session': False
+        }
+    }
+
+    # Отправляем request.json и response в функцию handle_dialog.
+    # Она сформирует оставшиеся поля JSON, которые отвечают
+    # непосредственно за ведение диалога
+    handle_dialog(request.json, response)
+
+    logging.info(f'Response:  {response!r}')
+
+    # Преобразовываем в JSON и возвращаем
+    return jsonify(response)
 
 
-@app.route('/<title>')
-@app.route('/index/<title>')
-def index(title):
-    return render_template('base.html', title=title)
+def handle_dialog(req, res):
+    user_id = req['session']['user_id']
+
+    if req['session']['new']:
+        # Это новый пользователь.
+        # Инициализируем сессию и поприветствуем его.
+        # Запишем подсказки, которые мы ему покажем в первый раз
+
+        sessionStorage[user_id] = {
+            'suggests': [
+                "Не хочу.",
+                "Не буду.",
+                "Отстань!",
+            ]
+        }
+        # Заполняем текст ответа
+        res['response']['text'] = 'Привет! Купи слона!'
+        # Получим подсказки
+        res['response']['buttons'] = get_suggests(user_id)
+        return
+
+    # Сюда дойдем только, если пользователь не новый,
+    # и разговор с Алисой уже был начат
+    # Обрабатываем ответ пользователя.
+    # В req['request']['original_utterance'] лежит весь текст,
+    # что нам прислал пользователь
+    # Если он написал 'ладно', 'куплю', 'покупаю', 'хорошо',
+    # то мы считаем, что пользователь согласился.
+    # Подумайте, всё ли в этом фрагменте написано "красиво"?
+    if req['request']['original_utterance'].lower() in [
+        'ладно',
+        'куплю',
+        'покупаю',
+        'хорошо'
+    ]:
+        # Пользователь согласился, прощаемся.
+        res['response']['text'] = 'Слона можно найти на Яндекс.Маркете!'
+        res['response']['end_session'] = True
+        return
+
+    # Если нет, то убеждаем его купить слона!
+    res['response']['text'] = f"Все говорят '{req['request']['original_utterance']}', а ты купи слона!"
+    res['response']['buttons'] = get_suggests(user_id)
 
 
-@app.route('/list_prof/<type_list>')
-def list_prof(type_list):
-    if type_list in ['ul', 'ol']:
-        return render_template('list_prof.html', type_list=type_list)
-    else:
-        return render_template('base.html', error='Неправильный адрес')
+# Функция возвращает две подсказки для ответа.
+def get_suggests(user_id):
+    session = sessionStorage[user_id]
 
+    # Выбираем две первые подсказки из массива.
+    suggests = [
+        {'title': suggest, 'hide': True}
+        for suggest in session['suggests'][:2]
+    ]
 
-@app.route('/auto_answer')
-@app.route('/answer')
-def auto_answer():
-    param = dict()
-    param['title'] = 'Анкета'
-    param['surname'] = random.choice(SURNAMES)
-    param['name'] = random.choice(MALE_NAMES + FEMALE_NAMES)
-    param['education'] = random.choice(EDUCATIONS)
-    param['profession'] = random.choice(PROFESSIONS)
-    param['sex'] = random.choice(SEX)
-    if param['sex'] in 'Мужчина Женщина'.split():
-        param['sex'] = 'Женщина' if param['name'] in FEMALE_NAMES else 'Мужчина'
-    param['motivation'] = random.choice(MOTIVATIONS)
-    param['ready'] = random.choice([True, False])
+    # Убираем первую подсказку, чтобы подсказки менялись каждый раз.
+    session['suggests'] = session['suggests'][1:]
+    sessionStorage[user_id] = session
 
-    return render_template('auto_answer.html', **param)
+    # Если осталась только одна подсказка, предлагаем подсказку
+    # со ссылкой на Яндекс.Маркет.
+    if len(suggests) < 2:
+        suggests.append({"title": "Ладно",
+                         "url": "https://market.yandex.ru/search?text=слон",
+                         "hide": True})
 
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    form = LoginForm()
-    if form.validate_on_submit():
-        return redirect('/success')
-    return render_template('login.html', title='Аварийный доступ', form=form)
-
-
-@app.route('/distribution')
-def distribution():
-    person_list = []
-    for i in range(random.randint(5, 15)):
-        name = random.choice(MALE_NAMES + FEMALE_NAMES) + ' ' + random.choice(SURNAMES)
-        person_list.append(name)
-    return render_template('distribution.html', people_list=person_list)
-
-
-@app.route('/table/<sex>/<age>')
-def cabin_decoration(sex, age):
-    age = int(age)
-    image = url_for('static', filename='img/Martian-adult.jpg') if age >= 21 else \
-        url_for('static', filename='img/Martian-child.jpg')
-    if sex == 'male':
-        color = COLORS['blue'] if age >= 21 else COLORS['lightblue']
-    else:
-        color = COLORS['purple'] if age >= 21 else COLORS['pink']
-    return render_template('cabin_decoration.html', image=image, color=color)
+    return suggests
 
 
 if __name__ == '__main__':
-    app.run(port=8080, host='127.0.0.1')
+    app.run()
